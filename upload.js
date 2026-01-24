@@ -137,8 +137,13 @@ async function s3Health() {
     }
 }
 
-scrapeAndUpload()
-    .then((res) => {
-        console.log("Upload completato con successo:", res);
-        process.exit(0);
-    })
+setInterval(() => {
+    s3Health().then((status) => {
+        console.log("MinIO/S3 health:", status);
+    });
+    scrapeAndUpload().then(() => {
+        console.log("Scrape and upload completed successfully.");
+    }).catch((err) => {
+        console.error("Errore in scrapeAndUpload:", (err && err.message) || err);
+    });
+}, 5 * 60 * 1000); // ogni 5 minuti
