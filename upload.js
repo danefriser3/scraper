@@ -62,6 +62,7 @@ async function scrapeAndUpload() {
             category: Array.isArray(item?.categories)
                 ? item.categories.map((c) => c?.name).filter(Boolean)
                 : [],
+            image: item?.assets?.find((img) => img?.mimeType && img.mimeType.startsWith("image/"))?.url ?? null,
         }));
 
         products.push(...normalized);
