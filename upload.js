@@ -1,19 +1,29 @@
-const { S3Client, PutObjectCommand, HeadBucketCommand, CreateBucketCommand } = require("@aws-sdk/client-s3");
+const { S3Client, PutObjectCommand, HeadBucketCommand, GetBucketLocationCommand } = require("@aws-sdk/client-s3");
 
-// Config MinIO/S3 from environment (with safe defaults)
-const S3_ENDPOINT = process.env.S3_ENDPOINT || "https://minio-hfis.onrender.com";
-const S3_REGION = process.env.S3_REGION || "us-east-1";
-const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY || "minio";
-const S3_SECRET_KEY = process.env.S3_SECRET_KEY || "miniopass";
-const BUCKET = process.env.S3_BUCKET || "products";
+// AWS S3 configuration via environment
+// Prefer AWS_* vars; fall back to S3_* for compatibility.
+const AWS_REGION = process.env.AWS_REGION || process.env.S3_REGION;
+const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID || process.env.S3_ACCESS_KEY;
+const AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY || process.env.S3_SECRET_KEY;
+const BUCKET = process.env.AWS_S3_BUCKET || process.env.S3_BUCKET;
 
-const s3 = new S3Client({
-    endpoint: S3_ENDPOINT,
-    region: S3_REGION,
-    credentials: { accessKeyId: S3_ACCESS_KEY, secretAccessKey: S3_SECRET_KEY },
-    forcePathStyle: true,
-});
-console.log("MinIO/S3 client configured", { endpoint: S3_ENDPOINT, region: S3_REGION, bucket: BUCKET });
+if (!BUCKET) {
+    throw new Error("Missing bucket name: set AWS_S3_BUCKET or S3_BUCKET");
+}
+
+// Helper to build S3 client (optionally with a specific region)
+function createS3Client(region) {
+    return new S3Client({
+        region: region || AWS_REGION,
+        credentials:
+            AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY
+                ? { accessKeyId: AWS_ACCESS_KEY_ID, secretAccessKey: AWS_SECRET_ACCESS_KEY }
+                : undefined,
+    });
+}
+
+let s3 = createS3Client();
+console.log("AWS S3 client configured", { region: AWS_REGION, bucket: BUCKET });
 // Aldi API endpoint (base, without limit/offset)
 const URL = "https://api.aldi.ie/v3/product-search?currency=EUR&serviceType=walk-in";
 
@@ -72,7 +82,7 @@ async function scrapeAndUpload() {
         if ((totalCount && offset >= totalCount) || normalized.length === 0) break;
     }
 
-    console.log(`Trovati ${products.length} prodotti, carico su MinIO/S3...`);
+    console.log(`Trovati ${products.length} prodotti, carico su AWS S3...`);
 
     // Genera chiave dinamica per ogni esecuzione
     // Use ISO timestamp to avoid spaces and locale quirks
@@ -81,28 +91,17 @@ async function scrapeAndUpload() {
     const key = `${iso.substring(0, 10)}/${iso.substring(11, 19).replace(/:/g, "")}.json`; // e.g. 2026-01-24/103547.json
     console.log("Upload key:", key);
 
-    // Ensure bucket exists (create if missing)
-    try {
-        await s3.send(new HeadBucketCommand({ Bucket: BUCKET }));
-        console.log("Bucket exists:", BUCKET);
-    } catch (err) {
-        console.warn("Bucket check failed, attempting create:", BUCKET, (err && err.name) || err);
-        try {
-            await s3.send(new CreateBucketCommand({ Bucket: BUCKET }));
-            console.log("Bucket created:", BUCKET);
-        } catch (createErr) {
-            // Helpful guidance for common MinIO misconfig
-            const msg = (createErr && createErr.message) || "";
-            if (createErr && createErr.Code === "InvalidArgument" && msg.includes("API port")) {
-                console.error("Bucket create failed: endpoint seems to be Console port. Use MinIO S3 API port (9000 or HTTPS reverse proxy). Endpoint:", S3_ENDPOINT);
-            } else {
-                console.error("Bucket create failed:", (createErr && createErr.name) || createErr, msg);
-            }
-            throw createErr;
-        }
+    // Ensure bucket exists and resolve its region (do not create on AWS)
+    const resolvedRegion = await resolveBucketRegionSafe(BUCKET);
+    if (resolvedRegion && resolvedRegion !== AWS_REGION) {
+        console.log("Uso regione del bucket risolta:", resolvedRegion);
+        s3 = createS3Client(resolvedRegion);
     }
+    // final reachability check
+    await s3.send(new HeadBucketCommand({ Bucket: BUCKET }));
+    console.log("Bucket reachable:", BUCKET);
 
-    // Upload su MinIO
+    // Upload to AWS S3
     try {
         const putResp = await s3.send(
             new PutObjectCommand({
@@ -115,27 +114,82 @@ async function scrapeAndUpload() {
         console.log("PutObject metadata:", putResp?.$metadata);
     } catch (putErr) {
         const msg = (putErr && putErr.message) || "";
-        if (putErr && putErr.Code === "InvalidArgument" && msg.includes("API port")) {
-            console.error("PutObject failed: request likely sent to Console port. Set S3_ENDPOINT to MinIO S3 API port (e.g., http://host:9000 or HTTPS reverse-proxy).", { endpoint: S3_ENDPOINT });
-        } else {
-            console.error("PutObject failed:", (putErr && putErr.name) || putErr, msg, putErr && putErr.$metadata);
-        }
+        const headers = (putErr && putErr.$metadata && putErr.$metadata.httpHeaders) || {};
+        const hintedRegion = headers["x-amz-bucket-region"] || putErr.region;
+        console.error("PutObject failed:", {
+            name: (putErr && putErr.name) || "Unknown",
+            code: (putErr && putErr.code) || "Unknown",
+            message: msg,
+            statusCode: putErr && putErr.$metadata && putErr.$metadata.httpStatusCode,
+            hintedRegion,
+        });
         throw putErr;
     }
 
-    console.log(`Prodotti caricati su MinIO/S3: ${BUCKET}/${key}`);
+    console.log(`Prodotti caricati su AWS S3: ${BUCKET}/${key}`);
     return { bucket: BUCKET, key, count: products.length };
 }
 
-// Simple health check against MinIO API
+// Simple health check against AWS S3: resolve region then head the bucket
 async function s3Health() {
-    const url = `${S3_ENDPOINT.replace(/\/$/, "")}/minio/health/live`;
     try {
-        const resp = await fetch(url);
-        return { live: resp.ok, status: resp.status, endpoint: S3_ENDPOINT };
+        const resolvedRegion = await resolveBucketRegionSafe(BUCKET);
+        const client = createS3Client(resolvedRegion || AWS_REGION);
+        await client.send(new HeadBucketCommand({ Bucket: BUCKET }));
+        return { live: true, bucket: BUCKET, region: resolvedRegion || AWS_REGION };
     } catch (e) {
-        return { live: false, endpoint: S3_ENDPOINT };
+        const headers = (e && e.$metadata && e.$metadata.httpHeaders) || {};
+        const hintedRegion = headers["x-amz-bucket-region"] || e.region;
+        return {
+            live: false,
+            bucket: BUCKET,
+            region: AWS_REGION,
+            hintedRegion,
+            error: (e && e.message) || String(e),
+        };
     }
+}
+
+// Resolve bucket region via HeadBucket header or GetBucketLocation fallback
+async function resolveBucketRegionSafe(bucket) {
+    // First attempt: HeadBucket to read x-amz-bucket-region
+    try {
+        await s3.send(new HeadBucketCommand({ Bucket: bucket }));
+        // If success, assume current region OK
+        return AWS_REGION;
+    } catch (err) {
+        const headers = (err && err.$metadata && err.$metadata.httpHeaders) || {};
+        let hintedRegion = headers["x-amz-bucket-region"] || err.region;
+        if (!hintedRegion) {
+            // Fallback: GetBucketLocation using us-east-1 (global)
+            const globalClient = createS3Client("us-east-1");
+            try {
+                const loc = await globalClient.send(new GetBucketLocationCommand({ Bucket: bucket }));
+                const constraint = (loc && loc.LocationConstraint) || null;
+                hintedRegion = normalizeLocation(constraint);
+            } catch (locErr) {
+                console.warn("GetBucketLocation fallito:", (locErr && locErr.message) || String(locErr));
+            }
+        }
+        return hintedRegion || null;
+    }
+}
+
+function normalizeLocation(constraint) {
+    // Map legacy values to modern regions
+    if (!constraint || constraint === "" || constraint === "US") return "us-east-1";
+    if (constraint === "EU") return "eu-west-1";
+    return constraint;
+}
+
+if (require.main === module) {
+    scrapeAndUpload()
+        .catch((e) => {
+            console.error("Errore in scrapeAndUpload:", (e && e.message) || e);
+        })
+        .then(() => {
+            console.log("Esecuzione scrapeAndUpload terminata.");
+        });
 }
 
 module.exports = { scrapeAndUpload, s3Health };
