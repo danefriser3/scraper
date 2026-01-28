@@ -34,14 +34,6 @@ function parsePrice(priceStr) {
 }
 
 async function scrapeAndUpload() {
-    // Wake up Render ingestor before uploading to MinIO/S3
-    const INGESTOR_URL = process.env.INGESTOR_URL || "https://ingestor-5uf2.onrender.com";
-    try {
-        const wake = await fetch(INGESTOR_URL, { method: "GET" });
-        console.log("Ingestor wakeup status:", wake.status);
-    } catch (e) {
-        console.warn("Ingestor non raggiungibile (proseguo comunque):", e && e.message ? e.message : e);
-    }
     const limit = 60;
     let offset = 0;
     let totalCount = null;
