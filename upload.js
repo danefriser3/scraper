@@ -153,8 +153,8 @@ async function resolveBucketRegionSafe(bucket) {
         const headers = (err && err.$metadata && err.$metadata.httpHeaders) || {};
         let hintedRegion = headers["x-amz-bucket-region"] || err.region;
         if (!hintedRegion) {
-            // Fallback: GetBucketLocation using us-east-1 (global)
-            const globalClient = createS3Client("us-east-1");
+            // Fallback: GetBucketLocation using eu-north-1 (global)
+            const globalClient = createS3Client(AWS_REGION);
             try {
                 const loc = await globalClient.send(new GetBucketLocationCommand({ Bucket: bucket }));
                 const constraint = (loc && loc.LocationConstraint) || null;
