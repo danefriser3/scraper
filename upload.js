@@ -1,4 +1,4 @@
-const { S3Client, PutObjectCommand, HeadBucketCommand, GetBucketLocationCommand } = require("@aws-sdk/client-s3");
+const { S3Client, PutObjectCommand, HeadBucketCommand, GetBucketLocationCommand, ListObjectsV2Command } = require("@aws-sdk/client-s3");
 
 // AWS S3 configuration via environment
 // Prefer AWS_* vars; fall back to S3_* for compatibility.
@@ -77,10 +77,36 @@ async function scrapeAndUpload() {
     console.log(`Trovati ${products.length} prodotti, carico su AWS S3...`);
 
     // Genera chiave dinamica per ogni esecuzione
-    // Use ISO timestamp to avoid spaces and locale quirks
     const now = new Date();
-    const iso = now.toISOString(); // e.g. 2026-01-24T10:35:47.123Z
-    const key = `${iso.substring(0, 10)}/${iso.substring(11, 19).replace(/:/g, "")}.json`; // e.g. 2026-01-24/103547.json
+    const iso = now.toISOString();
+    const datePrefix = iso.substring(0, 10).replace(/-/g, ""); // DDMMYYYY
+    const timeStr = iso.substring(11, 19).replace(/:/g, ""); // HHMMSS
+    const key = `${datePrefix}/${timeStr}.json`;
+    
+    // Verifica se esiste già un file per uno slot orario precedente
+    const currentHour = now.getUTCHours();
+    const slots = [9, 15, 21];
+    const passedSlots = slots.filter(h => currentHour >= h);
+    
+    if (passedSlots.length > 0) {
+        console.log(`Controllo file esistenti per slot: ${passedSlots}`);
+        const listResp = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${datePrefix}/` }));
+        
+        if (listResp.Contents && listResp.Contents.length > 0) {
+            for (const obj of listResp.Contents) {
+                const existingKey = obj.Key;
+                const match = existingKey.match(/\/(\d{2})(\d{2})(\d{2})\.json$/);
+                if (match) {
+                    const existingHour = parseInt(match[1], 10);
+                    if (passedSlots.includes(existingHour)) {
+                        console.log(`File già esistente per slot ${existingHour}:00 - skip upload`);
+                        return { bucket: BUCKET, key: existingKey, count: products.length, skipped: true };
+                    }
+                }
+            }
+        }
+    }
+    
     console.log("Upload key:", key);
 
     // Ensure bucket exists and resolve its region (do not create on AWS)
