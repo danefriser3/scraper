@@ -79,7 +79,7 @@ async function scrapeAndUpload() {
     // Genera chiave dinamica per ogni esecuzione
     const now = new Date();
     const iso = now.toISOString();
-    const datePrefix = iso.substring(0, 10).replace(/-/g, ""); // DDMMYYYY
+    const datePrefix = iso.substring(0, 10); // YYYY-MM-DD
     const timeStr = iso.substring(11, 19).replace(/:/g, ""); // HHMMSS
     const key = `${datePrefix}/${timeStr}.json`;
     
