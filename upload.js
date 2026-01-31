@@ -83,25 +83,24 @@ async function scrapeAndUpload() {
     const timeStr = iso.substring(11, 19).replace(/:/g, ""); // HHMMSS
     const key = `${datePrefix}/${timeStr}.json`;
     
-    // Verifica se esiste già un file per uno slot orario precedente
+    // Verifica se esiste già un file per lo slot orario corrente
     const currentHour = now.getUTCHours();
     const slots = [9, 15, 21];
-    const passedSlots = slots.filter(h => currentHour >= h);
+    const currentSlot = slots.find(h => currentHour >= h && currentHour < h + 6) || slots[slots.length - 1];
     
-    if (passedSlots.length > 0) {
-        console.log(`Controllo file esistenti per slot: ${passedSlots}`);
-        const listResp = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${datePrefix}/` }));
-        
-        if (listResp.Contents && listResp.Contents.length > 0) {
-            for (const obj of listResp.Contents) {
-                const existingKey = obj.Key;
-                const match = existingKey.match(/\/(\d{2})(\d{2})(\d{2})\.json$/);
-                if (match) {
-                    const existingHour = parseInt(match[1], 10);
-                    if (passedSlots.includes(existingHour)) {
-                        console.log(`File già esistente per slot ${existingHour}:00 - skip upload`);
-                        return { bucket: BUCKET, key: existingKey, count: products.length, skipped: true };
-                    }
+    console.log(`Ora corrente: ${currentHour}:00, slot corrente: ${currentSlot}:00`);
+    const listResp = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${datePrefix}/` }));
+    
+    if (listResp.Contents && listResp.Contents.length > 0) {
+        for (const obj of listResp.Contents) {
+            const existingKey = obj.Key;
+            const match = existingKey.match(/\/(\d{2})(\d{2})(\d{2})\.json$/);
+            if (match) {
+                const existingHour = parseInt(match[1], 10);
+                const existingSlot = slots.find(h => existingHour >= h && existingHour < h + 6) || slots[slots.length - 1];
+                if (existingSlot === currentSlot) {
+                    console.log(`File già esistente per slot ${currentSlot}:00 (${existingKey}) - skip upload`);
+                    return { bucket: BUCKET, key: existingKey, count: products.length, skipped: true };
                 }
             }
         }
